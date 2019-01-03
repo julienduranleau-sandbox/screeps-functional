@@ -1,0 +1,4 @@
+node_modules/
+default/*
+!default/.gitkeep
+.sync
