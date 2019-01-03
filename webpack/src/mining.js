@@ -49,18 +49,40 @@ function gatherFromSource(source) {
   }
 }
 
+function serializePath(path) {
+  return path.map(pos => `${pos.roomName}:${pos.x},${pos.y}`).join('|')
+}
+
+function deserializePath(serializePath) {
+  return serializePath.split('|').map(str => {
+    let parts = str.match(/([A-Z0-9]+):([0-9]+),([0-9]+)/)
+    return new RoomPosition(+parts[2], +parts[3], parts[1])
+  })
+}
+
+function getGatheringPath(from, to) {
+  return serializePath(PathFinder.search(from.pos, { pos: to.pos, range: 1 }).path)
+}
+
 function updateGatheringChain(chainId, from, to, nChainLinks) {
-  if (!Memory.gatherChains) Memory.gatherChains = {}
-  if (!Memory.gatherChains[chainId]) Memory.gatherChains[chainId] = []
+  if (!Memory.gatherChains) {
+    Memory.gatherChains = {}
+  }
+  if (!Memory.gatherChains[chainId]) {
+    Memory.gatherChains[chainId] = {
+      creeps: [],
+      path: getGatheringPath(from, to)
+    }
+  }
 
   let requireChainUpdate = false
 
   // remove dead creeps
-  for (let i = Memory.gatherChains[chainId].length - 1; i >= 0; i--) {
-    const creepId = Memory.gatherChains[chainId][i]
+  for (let i = Memory.gatherChains[chainId].creeps.length - 1; i >= 0; i--) {
+    const creepId = Memory.gatherChains[chainId].creeps[i]
 
     if (!Game.getObjectById(creepId)) {
-      Memory.gatherChains[chainId].splice(i, 1)
+      Memory.gatherChains[chainId].creeps.splice(i, 1)
       requireChainUpdate = true
     }
   }
@@ -70,14 +92,14 @@ function updateGatheringChain(chainId, from, to, nChainLinks) {
     const creep = Game.creeps[creepName]
 
     if (creep.memory.role === 'ChainLink' && creep.memory.chain.id === chainId && !creep.memory.chain.added) {
-      Memory.gatherChains[chainId].push(creep.id)
+      Memory.gatherChains[chainId].creeps.push(creep.id)
       creep.memory.chain.added = true
       requireChainUpdate = true
     }
   }
 
   // spawn new creeps
-  if (Memory.gatherChains[chainId].length < nChainLinks) {
+  if (Memory.gatherChains[chainId].creeps.length < nChainLinks) {
     requestSpawn([CARRY, MOVE], generateName(), {
       memory: {
         role: 'ChainLink',
@@ -96,78 +118,94 @@ function updateGatheringChain(chainId, from, to, nChainLinks) {
   }
 }
 
-function applyChain(from, to, creepIds) {
-  for (let i = 0; i < creepIds.length; i++) {
-    const creep = Game.getObjectById(creepIds[i])
+function applyChain(from, to, chain) {
+  console.log('APPLY CHAIN')
+  const path = deserializePath(chain.path)
+  const nChunks = ceil(path.length / chain.creeps.length)
+  const pathChunks = _.chunk(deserializePath(chain.path), nChunks)
 
-    if (i === 0) {
-        creep.memory.chain.from = from.id
-        creep.memory.chain.first = true
-    } else {
-        creep.memory.chain.from = creepIds[i - 1]
-        delete creep.memory.chain.first
-    }
+  for (let i = 0; i < chain.creeps.length; i++) {
+    const creep = Game.getObjectById(chain.creeps[i])
 
-    if (i === creepIds.length - 1) {
-        creep.memory.chain.to = to.id
-        creep.memory.chain.last = true
-    } else {
-        creep.memory.chain.to = creepIds[i + 1]
-        delete creep.memory.chain.last
-    }
+    creep.memory.chain.pathTo = serializePath(pathChunks[i])
+    creep.memory.chain.pathFrom = serializePath(pathChunks[i].reverse())
+    creep.memory.chain.onPath = false
+
+    if (i === 0) creep.memory.chain.first = true
+    else delete creep.memory.chain.first
+
+    if (i === chain.creeps.length - 1) creep.memory.chain.last = true
+    else delete creep.memory.chain.last
   }
 }
 
 function runGatheringChain(chainId) {
-  const creepsIdsInChain = Memory.gatherChains[chainId]
+  const creepsIdsInChain = Memory.gatherChains[chainId].creeps
 
   for (let creepId of creepsIdsInChain) {
     const creep = Game.getObjectById(creepId)
 
-    if (creep.carry[RESOURCE_ENERGY] < creep.carryCapacity) {
-      getResourceFromPrevInChain(creep)
+    if (creep.memory.chain.onPath === false) {
+      getCreepOnGatheringPath(creep)
     } else {
-      sendResourceToNextInChain(creep)
+      if (creep.carry[RESOURCE_ENERGY] < creep.carryCapacity) {
+        getResourceFromPrevInChain(creep)
+      } else {
+        sendResourceToNextInChain(creep)
+      }
     }
+  }
+}
+
+function getCreepOnGatheringPath(creep) {
+  const pathFrom = deserializePath(creep.memory.chain.pathFrom)
+  creep.moveTo(pathFrom[0])
+
+  if (creep.pos.isEqualTo(pathFrom[0])) {
+    creep.memory.chain.onPath = true
   }
 }
 
 function getResourceFromPrevInChain(creep) {
-  const to = Game.getObjectById(creep.memory.chain.to)
-  const from = Game.getObjectById(creep.memory.chain.from)
+  const pathFrom = deserializePath(creep.memory.chain.pathFrom)
 
+  creep.moveByPath(pathFrom)
+  
+  // TODO: Only check at end of path? Careful, breaks if simple pos === last
   if (creep.memory.chain.first) {
-    const droppedRessources = from.pos.findInRange(FIND_DROPPED_RESOURCES, 2)
+    const droppedRessources = creep.pos.findInRange(FIND_DROPPED_RESOURCES, 1)
     if (droppedRessources.length) {
-      if (creep.pickup(droppedRessources[0]) === ERR_NOT_IN_RANGE) {
-        creep.moveTo(droppedRessources[0])
-      } else {
-        creep.moveTo(from)
-      }
+      let status = creep.pickup(droppedRessources[0])
     }
-  } else {
-    creep.moveTo(from)
   }
 }
 
 function sendResourceToNextInChain(creep) {
-  const to = Game.getObjectById(creep.memory.chain.to)
-  const from = Game.getObjectById(creep.memory.chain.from)
+  const pathTo = deserializePath(creep.memory.chain.pathTo)
 
-  if (creep.memory.chain.last) {
-    const err = creep.transfer(to, RESOURCE_ENERGY)
-    if (err === ERR_NOT_IN_RANGE) {
-      creep.moveTo(to)
-    }
-    if (err === ERR_FULL) {
-      // replace with storage
-      creep.drop(RESOURCE_ENERGY)
-    }
-  } else {
-    if (creep.transfer(to, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-      creep.moveTo(to)
+  let status = creep.moveByPath(pathTo)
+  if (creep.pos.isEqualTo(_.last(pathTo))) {
+    if (creep.memory.chain.last) {
+      if (creep.pos.isEqualTo(_.last(pathTo))) {
+        creep.drop(RESOURCE_ENERGY)
+      }
+      // const err = creep.transfer(to, RESOURCE_ENERGY)
+      // if (err === ERR_NOT_IN_RANGE) {
+      //   creep.moveTo(to)
+      // }
+      // if (err === ERR_FULL) {
+      //   // replace with storage
+      // }
     } else {
-      creep.moveTo(from)
+      let transferTarget = creep.pos.findInRange(FIND_MY_CREEPS, 1, {
+        filter: function(otherCreep) {
+          return otherCreep.id !== creep.id && otherCreep.memory.role === "ChainLink" && otherCreep.memory.chain.id === creep.memory.chain.id
+        }
+      })
+
+      if (transferTarget.length) {
+        creep.transfer(transferTarget[0], RESOURCE_ENERGY)
+      }
     }
   }
 }

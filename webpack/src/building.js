@@ -7,23 +7,23 @@ export function init() {
   for (const creepName in Game.creeps) {
     const creep = Game.creeps[creepName]
 
-    if (creep.memory.role === 'Upgrader') {
+    if (creep.memory.role === 'Builder') {
       count++
-      runUpgrader(creep)
+      runBuilder(creep)
     }
   }
 
-  if (count < 1) {
+  if (count < 3) {
     requestSpawn([MOVE, MOVE, CARRY, WORK], generateName(), {
       memory: {
-        role: 'Upgrader',
+        role: 'Builder',
         status: 'fill' // 'spend'
       }
     })
   }
 }
 
-function runUpgrader(creep) {
+function runBuilder(creep) {
   if (creep.carry[RESOURCE_ENERGY] === creep.carryCapacity) {
     creep.memory.status = 'spend'
   } else if (creep.carry[RESOURCE_ENERGY] === 0) {
@@ -44,9 +44,11 @@ function runUpgrader(creep) {
       }
     }
   } else {
-    const err = creep.upgradeController(creep.room.controller)
-    creep.moveTo(creep.room.controller)
-    if (err === ERR_NOT_IN_RANGE) {
+    const target = creep.pos.findClosestByRange(FIND_CONSTRUCTION_SITES);
+    if(target) {
+      if (creep.build(target) === ERR_NOT_IN_RANGE) {
+        creep.moveTo(target)
+      }
     }
   }
 }
